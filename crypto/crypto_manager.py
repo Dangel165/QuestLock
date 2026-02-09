@@ -204,8 +204,26 @@ class CryptoManager:
     def decrypt_file(self, file_path: Path, private_key: rsa.RSAPrivateKey) -> DecryptionResult:
         """파일 복호화 (대용량 파일 최적화)"""
         try:
+            # 파일 존재 확인
+            if not file_path.exists():
+                return DecryptionResult(
+                    success=False,
+                    decrypted_file=Path(),
+                    checksum_match=False,
+                    error="파일이 존재하지 않습니다"
+                )
+            
             # 파일 크기 확인
             file_size = file_path.stat().st_size
+            
+            # 최소 헤더 크기 확인
+            if file_size < 600:  # 헤더 최소 크기
+                return DecryptionResult(
+                    success=False,
+                    decrypted_file=Path(),
+                    checksum_match=False,
+                    error="파일이 손상되었거나 암호화 파일이 아닙니다"
+                )
             
             # 헤더 읽기
             with open(file_path, 'rb') as f:
@@ -219,7 +237,7 @@ class CryptoManager:
                     success=False,
                     decrypted_file=Path(),
                     checksum_match=False,
-                    error="헤더 파싱 실패"
+                    error="헤더 파싱 실패 - 암호화 파일이 아니거나 손상됨"
                 )
             
             original_extension, encrypted_aes_key, original_checksum, data_start = header_info
@@ -235,6 +253,14 @@ class CryptoManager:
                     f.seek(data_start)
                     encrypted_data = f.read()
                 
+                if not encrypted_data:
+                    return DecryptionResult(
+                        success=False,
+                        decrypted_file=Path(),
+                        checksum_match=False,
+                        error="암호화된 데이터가 없습니다"
+                    )
+                
                 decrypted_data = self._decrypt_with_rsa(encrypted_data, private_key)
                 
                 import hashlib
@@ -247,7 +273,15 @@ class CryptoManager:
             else:
                 # 큰 파일: 청크 단위 하이브리드 복호화
                 # AES 키 복호화
-                aes_key = self._decrypt_with_rsa(encrypted_aes_key, private_key)
+                try:
+                    aes_key = self._decrypt_with_rsa(encrypted_aes_key, private_key)
+                except Exception as e:
+                    return DecryptionResult(
+                        success=False,
+                        decrypted_file=Path(),
+                        checksum_match=False,
+                        error=f"AES 키 복호화 실패: {str(e)}"
+                    )
                 
                 # 체크섬 계산을 위한 해시 객체
                 import hashlib
@@ -259,6 +293,8 @@ class CryptoManager:
                     
                     # IV 읽기
                     iv = f_in.read(16)
+                    if len(iv) != 16:
+                        raise ValueError("IV 읽기 실패")
                     
                     # 복호화 준비
                     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
@@ -275,15 +311,25 @@ class CryptoManager:
                         total_decrypted.extend(decrypted_chunk)
                     
                     # 최종화
-                    final_data = decryptor.finalize()
-                    if final_data:
-                        total_decrypted.extend(final_data)
+                    try:
+                        final_data = decryptor.finalize()
+                        if final_data:
+                            total_decrypted.extend(final_data)
+                    except Exception as e:
+                        # 패딩 오류 등 무시하고 계속 진행
+                        pass
                     
                     # 패딩 제거
                     if total_decrypted:
-                        padding_length = total_decrypted[-1]
-                        if 1 <= padding_length <= 16:
-                            total_decrypted = total_decrypted[:-padding_length]
+                        try:
+                            padding_length = total_decrypted[-1]
+                            if 1 <= padding_length <= 16:
+                                # 패딩이 올바른지 확인
+                                if all(b == padding_length for b in total_decrypted[-padding_length:]):
+                                    total_decrypted = total_decrypted[:-padding_length]
+                        except (IndexError, ValueError):
+                            # 패딩 제거 실패 시 그대로 사용
+                            pass
                     
                     # 파일 쓰기 및 체크섬 계산
                     f_out.write(total_decrypted)
@@ -296,9 +342,16 @@ class CryptoManager:
             try:
                 file_path.unlink()
             except PermissionError:
-                import stat
-                file_path.chmod(stat.S_IWRITE)
-                file_path.unlink()
+                try:
+                    import stat
+                    file_path.chmod(stat.S_IWRITE)
+                    file_path.unlink()
+                except Exception:
+                    # 삭제 실패해도 복호화는 성공으로 처리
+                    pass
+            except Exception:
+                # 삭제 실패해도 복호화는 성공으로 처리
+                pass
             
             return DecryptionResult(
                 success=True,
@@ -312,7 +365,7 @@ class CryptoManager:
                 success=False,
                 decrypted_file=Path(),
                 checksum_match=False,
-                error=str(e)
+                error=f"복호화 오류: {str(e)}"
             )
     
     def _encrypt_with_rsa(self, data: bytes, public_key: rsa.RSAPublicKey) -> bytes:

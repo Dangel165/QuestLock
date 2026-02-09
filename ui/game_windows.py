@@ -291,6 +291,20 @@ class ASCIIGameWindow(GameWindow):
                 entry.insert(0, str(current_input))
             else:
                 entry.delete(0, tk.END)
+    
+    def _reset_game(self):
+        """게임 리셋 (새 단어로 위젯 재생성)"""
+        if messagebox.askyesno("확인", "게임을 리셋하시겠습니까?\n(새로운 단어가 나옵니다)"):
+            self.game.reset()
+            
+            # 기존 위젯 제거
+            for widget in self.game_frame.winfo_children():
+                widget.destroy()
+            
+            # 새 위젯 생성
+            self.entry_widgets = []
+            self._create_ascii_widgets()
+            self._update_attempts()
 
 
 class RiddleGameWindow(GameWindow):
@@ -390,10 +404,16 @@ class RiddleGameWindow(GameWindow):
     def _update_display(self):
         """화면 업데이트"""
         super()._update_display()
+        # 문제 텍스트 업데이트
         self.question_text.config(text=self.riddle_game.question)
+        # 힌트 초기화
+        self.hint_label.config(text="")
+        # 답변 입력 필드 초기화
         if self.riddle_game.user_answer:
             self.answer_entry.delete(0, tk.END)
             self.answer_entry.insert(0, self.riddle_game.user_answer)
+        else:
+            self.answer_entry.delete(0, tk.END)
     
     def _check_solution(self):
         """정답 확인"""
@@ -419,7 +439,6 @@ class RiddleGameWindow(GameWindow):
         if messagebox.askyesno("확인", "게임을 리셋하시겠습니까?\n(새로운 문제가 나옵니다)"):
             self.game.reset()
             self._update_display()
-            self.answer_entry.delete(0, tk.END)
             self.answer_entry.focus_set()
 
 
