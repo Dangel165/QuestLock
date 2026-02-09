@@ -108,39 +108,115 @@ class CryptoManager:
     def encrypt_file(self, file_path: Path, public_key: rsa.RSAPublicKey) -> EncryptionResult:
         """파일 암호화 (대용량 파일 최적화)"""
         try:
+            # 파일 존재 및 접근 가능 확인
+            if not file_path.exists():
+                return EncryptionResult(
+                    success=False,
+                    encrypted_file=Path(),
+                    original_checksum="",
+                    error="파일이 존재하지 않습니다"
+                )
+            
+            # 파일 읽기 권한 확인
+            if not os.access(file_path, os.R_OK):
+                # 권한 없어도 시도
+                try:
+                    import stat
+                    file_path.chmod(stat.S_IREAD)
+                except Exception:
+                    pass
+            
             # 파일 크기 확인
-            file_size = file_path.stat().st_size
+            try:
+                file_size = file_path.stat().st_size
+            except Exception as e:
+                return EncryptionResult(
+                    success=False,
+                    encrypted_file=Path(),
+                    original_checksum="",
+                    error=f"파일 정보 읽기 실패: {str(e)}"
+                )
+            
+            # 빈 파일 처리
+            if file_size == 0:
+                return EncryptionResult(
+                    success=False,
+                    encrypted_file=Path(),
+                    original_checksum="",
+                    error="빈 파일은 암호화할 수 없습니다"
+                )
             
             # 암호화된 파일 경로
             encrypted_path = file_path.with_suffix(file_path.suffix + '.encrypted')
             
             # 작은 파일 (190바이트 이하): 직접 RSA 암호화
             if file_size <= self.MAX_RSA_ENCRYPT_SIZE:
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
+                try:
+                    with open(file_path, 'rb') as f:
+                        file_data = f.read()
+                except Exception as e:
+                    return EncryptionResult(
+                        success=False,
+                        encrypted_file=Path(),
+                        original_checksum="",
+                        error=f"파일 읽기 실패: {str(e)}"
+                    )
                 
                 import hashlib
                 original_checksum = hashlib.sha256(file_data).hexdigest()
                 
-                encrypted_data = self._encrypt_with_rsa(file_data, public_key)
+                try:
+                    encrypted_data = self._encrypt_with_rsa(file_data, public_key)
+                except Exception as e:
+                    return EncryptionResult(
+                        success=False,
+                        encrypted_file=Path(),
+                        original_checksum="",
+                        error=f"RSA 암호화 실패: {str(e)}"
+                    )
+                
                 encrypted_aes_key = b''
                 
                 header = self._create_header(file_path, encrypted_aes_key, original_checksum)
                 
-                with open(encrypted_path, 'wb') as f:
-                    f.write(header)
-                    f.write(encrypted_data)
+                try:
+                    with open(encrypted_path, 'wb') as f:
+                        f.write(header)
+                        f.write(encrypted_data)
+                except Exception as e:
+                    return EncryptionResult(
+                        success=False,
+                        encrypted_file=Path(),
+                        original_checksum="",
+                        error=f"암호화 파일 쓰기 실패: {str(e)}"
+                    )
             
             else:
                 # 큰 파일: 청크 단위 하이브리드 암호화 (메모리 효율적)
-                original_checksum = self._calculate_file_checksum(file_path)
+                try:
+                    original_checksum = self._calculate_file_checksum(file_path)
+                except Exception as e:
+                    return EncryptionResult(
+                        success=False,
+                        encrypted_file=Path(),
+                        original_checksum="",
+                        error=f"체크섬 계산 실패: {str(e)}"
+                    )
                 
                 # AES 키 생성
                 aes_key = os.urandom(32)  # 256비트
                 iv = os.urandom(16)  # 128비트
                 
                 # AES 키를 RSA로 암호화
-                encrypted_aes_key = self._encrypt_with_rsa(aes_key, public_key)
+                try:
+                    encrypted_aes_key = self._encrypt_with_rsa(aes_key, public_key)
+                except Exception as e:
+                    return EncryptionResult(
+                        success=False,
+                        encrypted_file=Path(),
+                        original_checksum="",
+                        error=f"AES 키 암호화 실패: {str(e)}"
+                    )
                 
                 # 헤더 생성
                 header = self._create_header(file_path, encrypted_aes_key, original_checksum)
@@ -149,42 +225,64 @@ class CryptoManager:
                 cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
                 encryptor = cipher.encryptor()
                 
-                with open(file_path, 'rb') as f_in, open(encrypted_path, 'wb') as f_out:
-                    # 헤더 쓰기
-                    f_out.write(header)
-                    # IV 쓰기
-                    f_out.write(iv)
-                    
-                    # 청크 단위로 읽고 암호화
-                    while True:
-                        chunk = f_in.read(self.CHUNK_SIZE)
-                        if not chunk:
-                            break
+                try:
+                    with open(file_path, 'rb') as f_in, open(encrypted_path, 'wb') as f_out:
+                        # 헤더 쓰기
+                        f_out.write(header)
+                        # IV 쓰기
+                        f_out.write(iv)
                         
-                        # 마지막 청크인 경우 패딩 추가
-                        if len(chunk) < self.CHUNK_SIZE:
-                            padding_length = 16 - (len(chunk) % 16)
-                            chunk = chunk + bytes([padding_length] * padding_length)
-                        elif len(chunk) % 16 != 0:
-                            padding_length = 16 - (len(chunk) % 16)
-                            chunk = chunk + bytes([padding_length] * padding_length)
+                        # 청크 단위로 읽고 암호화
+                        total_read = 0
+                        while True:
+                            chunk = f_in.read(self.CHUNK_SIZE)
+                            if not chunk:
+                                break
+                            
+                            total_read += len(chunk)
+                            
+                            # 마지막 청크인 경우 패딩 추가
+                            if len(chunk) < self.CHUNK_SIZE or total_read >= file_size:
+                                padding_length = 16 - (len(chunk) % 16)
+                                if padding_length != 16:  # 이미 16의 배수가 아닌 경우만
+                                    chunk = chunk + bytes([padding_length] * padding_length)
+                            
+                            encrypted_chunk = encryptor.update(chunk)
+                            f_out.write(encrypted_chunk)
                         
-                        encrypted_chunk = encryptor.update(chunk)
-                        f_out.write(encrypted_chunk)
-                    
-                    # 최종화
-                    final_data = encryptor.finalize()
-                    if final_data:
-                        f_out.write(final_data)
+                        # 최종화
+                        final_data = encryptor.finalize()
+                        if final_data:
+                            f_out.write(final_data)
+                            
+                except Exception as e:
+                    # 실패 시 암호화 파일 삭제
+                    if encrypted_path.exists():
+                        try:
+                            encrypted_path.unlink()
+                        except Exception:
+                            pass
+                    return EncryptionResult(
+                        success=False,
+                        encrypted_file=Path(),
+                        original_checksum="",
+                        error=f"파일 암호화 중 오류: {str(e)}"
+                    )
             
             # 원본 파일 삭제 (권한 무시하고 강제 삭제 시도)
             try:
                 file_path.unlink()
             except PermissionError:
-                # 권한 오류 시 강제 삭제 시도
-                import stat
-                file_path.chmod(stat.S_IWRITE)
-                file_path.unlink()
+                try:
+                    import stat
+                    file_path.chmod(stat.S_IWRITE)
+                    file_path.unlink()
+                except Exception:
+                    # 삭제 실패해도 암호화는 성공으로 처리
+                    pass
+            except Exception:
+                # 삭제 실패해도 암호화는 성공으로 처리
+                pass
             
             return EncryptionResult(
                 success=True,
@@ -198,7 +296,7 @@ class CryptoManager:
                 success=False,
                 encrypted_file=Path(),
                 original_checksum="",
-                error=str(e)
+                error=f"예상치 못한 오류: {str(e)}"
             )
     
     def decrypt_file(self, file_path: Path, private_key: rsa.RSAPrivateKey) -> DecryptionResult:
