@@ -316,6 +316,7 @@ class RecoveryWindow:
         total_files = len(selected_indices)
         success_count = 0
         failed_files = []
+        checksum_mismatch_files = []
         
         self.progress_bar['maximum'] = total_files
         self.progress_bar['value'] = 0
@@ -335,12 +336,26 @@ class RecoveryWindow:
                 if result.success:
                     success_count += 1
                     self.logger.info(f"복구 성공: {file_path}")
+                    
+                    # 체크섬 불일치 경고
+                    if not result.checksum_match:
+                        checksum_mismatch_files.append({
+                            'path': str(file_path),
+                            'error': '체크섬 불일치 - 파일이 손상되었을 수 있음'
+                        })
+                        self.logger.warning(f"체크섬 불일치: {file_path}")
                 else:
-                    failed_files.append(str(file_path))
+                    failed_files.append({
+                        'path': str(file_path),
+                        'error': result.error or '알 수 없는 오류'
+                    })
                     self.logger.error(f"복구 실패: {file_path} - {result.error}")
                     
             except Exception as e:
-                failed_files.append(str(file_path))
+                failed_files.append({
+                    'path': str(file_path),
+                    'error': f'예외 발생: {str(e)}'
+                })
                 self.logger.error(f"복구 중 오류: {file_path} - {str(e)}")
             
             self.progress_bar['value'] = i + 1
@@ -351,26 +366,196 @@ class RecoveryWindow:
         result_msg = f"복구 완료!\n\n"
         result_msg += f"총 파일: {total_files}개\n"
         result_msg += f"성공: {success_count}개\n"
-        result_msg += f"실패: {len(failed_files)}개"
+        result_msg += f"실패: {len(failed_files)}개\n"
         
-        if failed_files:
-            result_msg += f"\n\n실패한 파일:\n"
-            for failed_file in failed_files[:10]:  # 최대 10개만 표시
-                result_msg += f"- {Path(failed_file).name}\n"
-            if len(failed_files) > 10:
-                result_msg += f"... 외 {len(failed_files) - 10}개"
+        if checksum_mismatch_files:
+            result_msg += f"체크섬 불일치: {len(checksum_mismatch_files)}개\n"
+        
+        if failed_files or checksum_mismatch_files:
+            result_msg += "\n자세한 오류 내용은 '오류 로그 보기' 버튼을 클릭하세요."
         
         messagebox.showinfo("복구 완료", result_msg)
+        
+        # 오류 로그 표시 (실패한 파일이 있는 경우)
+        if failed_files or checksum_mismatch_files:
+            self._show_error_log(failed_files, checksum_mismatch_files)
         
         # 리스트 새로고침
         if success_count > 0:
             # 성공한 파일들을 목록에서 제거
             for index in reversed(list(selected_indices)):
                 file_path = self.encrypted_files[index]
-                if file_path not in [Path(f) for f in failed_files]:
+                # 완전히 실패한 파일만 남기기 (체크섬 불일치는 복구 성공으로 간주)
+                if not any(str(file_path) == f['path'] for f in failed_files):
                     del self.encrypted_files[index]
             
             self._update_file_list()
+    
+    def _show_error_log(self, failed_files: list, checksum_mismatch_files: list):
+        """오류 로그 표시"""
+        log_window = tk.Toplevel(self.root)
+        log_window.title("오류 로그")
+        log_window.geometry("800x600")
+        
+        # 제목
+        title_label = tk.Label(
+            log_window,
+            text="복구 오류 상세 로그",
+            font=("Arial", 14, "bold"),
+            bg="#ff6b6b",
+            fg="white",
+            pady=10
+        )
+        title_label.pack(fill="x")
+        
+        # 탭 생성
+        notebook = ttk.Notebook(log_window)
+        notebook.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # 실패 탭
+        if failed_files:
+            failed_frame = tk.Frame(notebook)
+            notebook.add(failed_frame, text=f"복구 실패 ({len(failed_files)}개)")
+            
+            # 스크롤바
+            failed_scrollbar = tk.Scrollbar(failed_frame)
+            failed_scrollbar.pack(side="right", fill="y")
+            
+            # 텍스트 위젯
+            failed_text = tk.Text(
+                failed_frame,
+                wrap=tk.WORD,
+                yscrollcommand=failed_scrollbar.set,
+                font=("Courier", 9),
+                bg="#fff5f5"
+            )
+            failed_text.pack(fill="both", expand=True)
+            failed_scrollbar.config(command=failed_text.yview)
+            
+            # 오류 내용 추가
+            for i, file_info in enumerate(failed_files, 1):
+                file_path = Path(file_info['path'])
+                error_msg = file_info['error']
+                
+                failed_text.insert(tk.END, f"[{i}] ", "index")
+                failed_text.insert(tk.END, f"{file_path.name}\n", "filename")
+                failed_text.insert(tk.END, f"    경로: {file_path}\n", "path")
+                failed_text.insert(tk.END, f"    오류: {error_msg}\n\n", "error")
+            
+            # 태그 설정
+            failed_text.tag_config("index", foreground="#666", font=("Courier", 9, "bold"))
+            failed_text.tag_config("filename", foreground="#c92a2a", font=("Courier", 10, "bold"))
+            failed_text.tag_config("path", foreground="#495057")
+            failed_text.tag_config("error", foreground="#e03131")
+            
+            failed_text.config(state="disabled")
+        
+        # 체크섬 불일치 탭
+        if checksum_mismatch_files:
+            checksum_frame = tk.Frame(notebook)
+            notebook.add(checksum_frame, text=f"체크섬 불일치 ({len(checksum_mismatch_files)}개)")
+            
+            # 경고 메시지
+            warning_label = tk.Label(
+                checksum_frame,
+                text="⚠️ 다음 파일들은 복구되었지만 체크섬이 일치하지 않습니다.\n파일이 손상되었을 수 있으니 확인이 필요합니다.",
+                font=("Arial", 9),
+                bg="#fff3bf",
+                fg="#f08c00",
+                pady=10
+            )
+            warning_label.pack(fill="x")
+            
+            # 스크롤바
+            checksum_scrollbar = tk.Scrollbar(checksum_frame)
+            checksum_scrollbar.pack(side="right", fill="y")
+            
+            # 텍스트 위젯
+            checksum_text = tk.Text(
+                checksum_frame,
+                wrap=tk.WORD,
+                yscrollcommand=checksum_scrollbar.set,
+                font=("Courier", 9),
+                bg="#fffbf0"
+            )
+            checksum_text.pack(fill="both", expand=True)
+            checksum_scrollbar.config(command=checksum_text.yview)
+            
+            # 내용 추가
+            for i, file_info in enumerate(checksum_mismatch_files, 1):
+                file_path = Path(file_info['path'])
+                
+                checksum_text.insert(tk.END, f"[{i}] ", "index")
+                checksum_text.insert(tk.END, f"{file_path.name}\n", "filename")
+                checksum_text.insert(tk.END, f"    경로: {file_path}\n", "path")
+                checksum_text.insert(tk.END, f"    상태: 복구됨 (체크섬 불일치)\n\n", "warning")
+            
+            # 태그 설정
+            checksum_text.tag_config("index", foreground="#666", font=("Courier", 9, "bold"))
+            checksum_text.tag_config("filename", foreground="#f59f00", font=("Courier", 10, "bold"))
+            checksum_text.tag_config("path", foreground="#495057")
+            checksum_text.tag_config("warning", foreground="#f08c00")
+            
+            checksum_text.config(state="disabled")
+        
+        # 도움말 탭
+        help_frame = tk.Frame(notebook)
+        notebook.add(help_frame, text="도움말")
+        
+        help_text = tk.Text(help_frame, wrap=tk.WORD, font=("Arial", 10), bg="#f8f9fa")
+        help_text.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        help_content = """
+복구 오류 해결 방법
+
+1. 파일이 존재하지 않습니다
+   → 파일이 삭제되었거나 이동되었습니다. 파일 경로를 확인하세요.
+
+2. 파일이 손상되었거나 암호화 파일이 아닙니다
+   → 파일 크기가 너무 작거나 헤더가 손상되었습니다.
+   → 올바른 암호화 파일인지 확인하세요.
+
+3. 헤더 파싱 실패
+   → 암호화 파일의 헤더가 손상되었습니다.
+   → 다른 프로그램으로 암호화된 파일일 수 있습니다.
+
+4. AES 키 복호화 실패
+   → 잘못된 개인키를 사용했거나 키가 손상되었습니다.
+   → 올바른 키 파일을 선택했는지 확인하세요.
+
+5. 체크섬 불일치
+   → 파일은 복구되었지만 원본과 다를 수 있습니다.
+   → 파일을 열어서 정상적으로 작동하는지 확인하세요.
+   → 중요한 파일인 경우 백업에서 복원하는 것을 권장합니다.
+
+6. 암호화된 데이터가 없습니다
+   → 파일이 비어있거나 데이터 영역이 손상되었습니다.
+
+7. 복호화 오류
+   → 암호화 알고리즘 오류 또는 파일 손상입니다.
+   → 파일을 다시 암호화하거나 백업에서 복원하세요.
+
+추가 도움이 필요하면 로그 파일을 확인하거나 개발자에게 문의하세요.
+        """
+        
+        help_text.insert(tk.END, help_content)
+        help_text.config(state="disabled")
+        
+        # 닫기 버튼
+        close_btn = tk.Button(
+            log_window,
+            text="닫기",
+            command=log_window.destroy,
+            bg="lightgray",
+            font=("Arial", 10),
+            padx=20,
+            pady=5
+        )
+        close_btn.pack(pady=10)
+        
+        # 창 중앙 배치
+        log_window.transient(self.root)
+        log_window.grab_set()
     
     def show(self):
         """윈도우 표시"""
